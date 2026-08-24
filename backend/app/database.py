@@ -3,6 +3,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,8 @@ if settings.has_database:
     )
     logger.info("Connected to PostgreSQL database")
 else:
-    DATABASE_URL = "sqlite:///./ner_smartlogix_demo.db"
+    sqlite_path = "/tmp/ner_smartlogix_demo.db" if os.getenv("VERCEL") else "./ner_smartlogix_demo.db"
+    DATABASE_URL = f"sqlite:///{sqlite_path}"
     engine = create_engine(
         DATABASE_URL,
         connect_args={"check_same_thread": False}
