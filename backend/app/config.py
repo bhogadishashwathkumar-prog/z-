@@ -15,12 +15,18 @@ class Settings(BaseSettings):
     # External APIs
     GEMINI_API_KEY: str = ""
     OPENWEATHER_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3.6-flash"
 
     # App
     APP_NAME: str = "NER SmartLogix"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
-    CORS_ORIGINS: list = ["http://localhost:5173", "http://localhost:3000"]
+    CORS_ORIGINS: list = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://smart-ai-gamma-red.vercel.app",
+        "https://z-lovat-phi.vercel.app"
+    ]
 
     class Config:
         env_file = ".env"

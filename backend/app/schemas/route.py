@@ -43,6 +43,7 @@ class RouteCandidate(BaseModel):
     risk_factors: RiskFactors
     waypoints: Optional[List] = None
     is_recommended: bool = False
+    priority_explanation: Optional[str] = None
     ai_explanation: Optional[str] = None
 
 

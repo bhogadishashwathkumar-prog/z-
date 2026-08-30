@@ -89,7 +89,7 @@ export default function RoutePlanner() {
       console.error(err);
       setError(err.response?.data?.detail || "Route planning failed. Generating demo alternative routing.");
       // Seed fallback demo routing for simulation
-      const mockResult = generateMockRouteAnalysis(source, destination);
+      const mockResult = generateMockRouteAnalysis(source, destination, priority);
       setAnalysisResult(mockResult);
       setSelectedRoute(mockResult.recommended_route);
     } finally {
@@ -206,6 +206,20 @@ export default function RoutePlanner() {
                         <div style={{ fontSize: 12, fontWeight: 800, color: getAccessibilityColor(route.accessibility_score) }}>{route.accessibility_score}</div>
                       </div>
                     </div>
+
+                    {route.is_recommended && (
+                      <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--color-border)', fontSize: 11, color: '#60a5fa', lineHeight: 1.4 }}>
+                        <strong style={{ color: '#93c5fd' }}>Why this route?</strong> {
+                          route.priority_explanation || (
+                            priority === 'EMERGENCY'
+                              ? "Recommended because safety and accessibility are prioritized over distance and travel time under EMERGENCY priority."
+                              : priority === 'HIGH'
+                              ? "Recommended because safety and reliability are prioritized under HIGH priority."
+                              : "Recommended because it provides the best overall balance across safety, accessibility, and reliability."
+                          )
+                        }
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -309,16 +323,21 @@ export default function RoutePlanner() {
 }
 
 // Generate fallback mock data when FastAPI backend has geocoding/routing issues (ensures live SIH demo works)
-function generateMockRouteAnalysis(source, destination) {
-  const waypoints = [
+function generateMockRouteAnalysis(source, destination, priority = 'NORMAL') {
+  const waypointsRoute1 = [
     [91.7362, 26.1445], // Guwahati
-    [91.8211, 25.8611], // Nongpoh midpoint
+    [91.7850, 26.0100], 
+    [91.8211, 25.8611], // Nongpoh midpoint curve
+    [91.8550, 25.7100],
     [91.8933, 25.5788]  // Shillong
   ];
 
-  return {
-    recommended_route: {
-      route_id: 'mock-recommended',
+  const waypointsRoute2 = waypointsRoute1.map((w, idx) => [w[0] + (idx === 2 ? 0.08 : 0.04), w[1] - 0.02]);
+  const waypointsRoute3 = waypointsRoute1.map((w, idx) => [w[0] - (idx === 2 ? 0.06 : 0.03), w[1] + 0.01]);
+
+  const candidates = [
+    {
+      route_id: 'mock-route-1',
       source,
       destination,
       distance_km: 98.4,
@@ -329,41 +348,65 @@ function generateMockRouteAnalysis(source, destination) {
       weather_risk: 'MEDIUM',
       road_condition: 'GOOD',
       disruption_risk: 'LOW',
-      is_recommended: true,
-      risk_factors: {
-        weather_risk: 32,
-        terrain_risk: 25,
-        disruption_risk: 15,
-        road_risk: 20,
-        historical_risk: 18
-      },
-      waypoints,
-      ai_explanation: "[DEMO MODE FALLBACK]\nRoute Option 1 via NH-6 is highly recommended because it bypasses the higher elevation passes prone to heavy rainfall. Road quality is verified as good for truck categories, despite the moderate rain forecast."
+      risk_factors: { weather_risk: 32, terrain_risk: 25, disruption_risk: 15, road_risk: 20, historical_risk: 18 },
+      waypoints: waypointsRoute1
     },
-    alternatives: [
-      {
-        route_id: 'mock-alt-1',
-        source,
-        destination,
-        distance_km: 112.5,
-        eta_minutes: 210,
-        risk_score: 54.0,
-        accessibility_score: 52.4,
-        reliability_score: 49.2,
-        weather_risk: 'HIGH',
-        road_condition: 'POOR',
-        disruption_risk: 'MEDIUM',
-        is_recommended: false,
-        risk_factors: {
-          weather_risk: 65,
-          terrain_risk: 60,
-          disruption_risk: 45,
-          road_risk: 50,
-          historical_risk: 35
-        },
-        waypoints: waypoints.map(w => [w[0] + 0.1, w[1] - 0.05])
-      }
-    ],
+    {
+      route_id: 'mock-route-2',
+      source,
+      destination,
+      distance_km: 112.5,
+      eta_minutes: 210,
+      risk_score: 18.0,
+      accessibility_score: 88.0,
+      reliability_score: 91.0,
+      weather_risk: 'LOW',
+      road_condition: 'GOOD',
+      disruption_risk: 'LOW',
+      risk_factors: { weather_risk: 18, terrain_risk: 20, disruption_risk: 10, road_risk: 15, historical_risk: 12 },
+      waypoints: waypointsRoute2
+    },
+    {
+      route_id: 'mock-route-3',
+      source,
+      destination,
+      distance_km: 92.0,
+      eta_minutes: 150,
+      risk_score: 48.0,
+      accessibility_score: 65.0,
+      reliability_score: 58.5,
+      weather_risk: 'HIGH',
+      road_condition: 'MODERATE',
+      disruption_risk: 'MEDIUM',
+      risk_factors: { weather_risk: 55, terrain_risk: 45, disruption_risk: 35, road_risk: 40, historical_risk: 30 },
+      waypoints: waypointsRoute3
+    }
+  ];
+
+  // Priority weights
+  const weights = priority === 'EMERGENCY'
+    ? { safety: 0.50, accessibility: 0.25, reliability: 0.20, travel_time: 0.05, distance: 0.00 }
+    : priority === 'HIGH'
+    ? { safety: 0.40, accessibility: 0.20, reliability: 0.30, travel_time: 0.08, distance: 0.02 }
+    : { safety: 0.35, accessibility: 0.25, reliability: 0.20, travel_time: 0.15, distance: 0.05 };
+
+  const maxTime = Math.max(...candidates.map(c => c.eta_minutes));
+  const maxDist = Math.max(...candidates.map(c => c.distance_km));
+
+  candidates.forEach(c => {
+    const safetyScore = 100 - c.risk_score;
+    const timeScore = (1 - c.eta_minutes / maxTime) * 100;
+    const distScore = (1 - c.distance_km / maxDist) * 100;
+    c.score = safetyScore * weights.safety + c.accessibility_score * weights.accessibility + c.reliability_score * weights.reliability + timeScore * weights.travel_time + distScore * weights.distance;
+  });
+
+  candidates.sort((a, b) => b.score - a.score);
+  const recommended = { ...candidates[0], is_recommended: true };
+  const alternatives = candidates.slice(1).map(c => ({ ...c, is_recommended: false }));
+
+  return {
+    recommended_route: recommended,
+    alternatives,
     weather_data: {
       temperature_c: 22.0,
       rainfall_mm: 12.0,

@@ -9,7 +9,7 @@ passlib[bcrypt]
 python-multipart
 httpx
 python-dotenv
-google-generativeai
+google-genai
 requests
 aiohttp
 email-validator

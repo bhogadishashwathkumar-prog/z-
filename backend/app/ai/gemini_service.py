@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional
+from typing import Dict
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -23,18 +23,8 @@ If conditions worsen, the alternative route via lower elevation may provide safe
 *This explanation is generated from backend-calculated data. No real-time government or weather data was used to generate this summary.*"""
 
 
-async def analyze_route_with_ai(route_data: Dict) -> str:
-    """Call Gemini API to generate route explanation."""
-    if not settings.has_gemini:
-        logger.info("Gemini API not configured - returning demo explanation")
-        return DEMO_EXPLANATION
-
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-
-        prompt = f"""You are an AI logistics intelligence assistant for the North Eastern Region (NER) of India.
+def _build_route_prompt(route_data: Dict) -> str:
+    return f"""You are an AI logistics intelligence assistant for the North Eastern Region (NER) of India.
 
 Analyze the following route data and provide a clear, professional explanation.
 
@@ -66,25 +56,9 @@ INSTRUCTIONS:
 
 Limit response to 300 words."""
 
-        response = model.generate_content(prompt)
-        return response.text
 
-    except Exception as e:
-        logger.error(f"Gemini API error: {e}")
-        return f"[AI analysis unavailable — backend error. Using demo explanation]\n\n{DEMO_EXPLANATION}"
-
-
-async def explain_risk_with_ai(risk_data: Dict) -> str:
-    """Generate a plain-language risk explanation using Gemini."""
-    if not settings.has_gemini:
-        return "[DEMO MODE] Risk score has been calculated based on weather conditions, road infrastructure, terrain difficulty, active disruption reports, and historical data for this NER corridor. Higher scores indicate routes with greater danger and should be avoided unless absolutely necessary."
-
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-
-        prompt = f"""Explain this route risk score in plain language for a logistics operator in NER India.
+def _build_risk_prompt(risk_data: Dict) -> str:
+    return f"""Explain this route risk score in plain language for a logistics operator in NER India.
 
 Risk Score: {risk_data.get('total_risk')}/100
 Risk Level: {risk_data.get('risk_level')}
@@ -97,9 +71,99 @@ Reasons: {', '.join(risk_data.get('reasons', []))}
 
 Provide a 3-4 sentence plain-language explanation of why this risk score was assigned. Do NOT add information not in the data provided."""
 
-        response = model.generate_content(prompt)
-        return response.text
 
+def _categorize_gemini_error(e: Exception) -> str:
+    """Categorize Gemini API exceptions into standard categories for audit and log clarity."""
+    error_str = str(e).lower()
+    error_type = type(e).__name__
+
+    code = getattr(e, 'code', None)
+    if code in (400, 403) or any(k in error_str for k in ['api_key_invalid', 'invalid api key', 'unauthorized', 'forbidden', 'permissiondenied']):
+        return "INVALID_API_KEY"
+    if code == 404 or any(k in error_str for k in ['not_found', 'model not found', 'not found']):
+        return "MODEL_NOT_FOUND"
+    if code == 429 or any(k in error_str for k in ['quota', 'resourceexhausted', 'rate limit', 'too many requests']):
+        return "QUOTA_EXCEEDED"
+    if any(k in error_str for k in ['connection', 'timeout', 'unreachable', 'network', 'httpx', 'socket']):
+        return "NETWORK_ERROR"
+
+    return f"OTHER_API_ERROR ({error_type})"
+
+
+async def analyze_route_with_ai(route_data: Dict) -> str:
+    """Call Gemini API to generate route explanation using the google-genai SDK."""
+    model_name = settings.GEMINI_MODEL or "gemini-3.6-flash"
+
+    # Safe diagnostic logging (never log API keys or secrets)
+    logger.info(f"Gemini configured: {'yes' if settings.has_gemini else 'no'}")
+    logger.info(f"Gemini model: {model_name}")
+
+    if not settings.has_gemini:
+        logger.warning("Gemini Error [MISSING_API_KEY]: GEMINI_API_KEY is not configured — returning demo explanation")
+        return DEMO_EXPLANATION
+
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        prompt = _build_route_prompt(route_data)
+
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+            ),
+        )
+
+        if response and response.text:
+            return response.text
+        else:
+            logger.warning("Gemini returned empty text response — using demo fallback")
+            return f"[AI analysis unavailable — empty response. Using demo explanation]\n\n{DEMO_EXPLANATION}"
+
+    except ImportError as e:
+        logger.error(f"Gemini Error [SDK_IMPORT_ERROR]: google-genai package missing or import failed: {e}")
+        return f"[AI analysis unavailable — missing google-genai package]\n\n{DEMO_EXPLANATION}"
     except Exception as e:
-        logger.error(f"Gemini risk explain error: {e}")
-        return "[AI explanation unavailable]"
+        category = _categorize_gemini_error(e)
+        logger.error(f"Gemini Error [{category}]: {e}")
+        return f"[AI analysis unavailable — backend error ({category}). Using demo explanation]\n\n{DEMO_EXPLANATION}"
+
+
+async def explain_risk_with_ai(risk_data: Dict) -> str:
+    """Generate a plain-language risk explanation using the google-genai SDK."""
+    model_name = settings.GEMINI_MODEL or "gemini-3.6-flash"
+
+    if not settings.has_gemini:
+        logger.warning("Gemini risk explain skipped [MISSING_API_KEY]: returning demo risk text")
+        return "[DEMO MODE] Risk score has been calculated based on weather conditions, road infrastructure, terrain difficulty, active disruption reports, and historical data for this NER corridor. Higher scores indicate routes with greater danger and should be avoided unless absolutely necessary."
+
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        prompt = _build_risk_prompt(risk_data)
+
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+            ),
+        )
+
+        if response and response.text:
+            return response.text
+        return "[AI explanation unavailable — empty response]"
+
+    except ImportError as e:
+        logger.error(f"Gemini risk explain error [SDK_IMPORT_ERROR]: google-genai package missing: {e}")
+        return "[AI explanation unavailable — missing google-genai package]"
+    except Exception as e:
+        category = _categorize_gemini_error(e)
+        logger.error(f"Gemini risk explain error [{category}]: {e}")
+        return f"[AI explanation unavailable — {category}]"
+

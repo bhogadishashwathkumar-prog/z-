@@ -19,6 +19,34 @@ from app.models.user import User
 router = APIRouter(prefix="/api/routes", tags=["Routes"])
 logger = logging.getLogger(__name__)
 
+# Priority-based composite scoring weights
+# Safety = 100 - risk_score (higher = safer)
+# Accessibility, Reliability: higher = better
+# Travel Time, Distance: lower = better → converted to scores (inverted)
+PRIORITY_WEIGHTS = {
+    "NORMAL": {
+        "safety": 0.35,
+        "accessibility": 0.25,
+        "reliability": 0.20,
+        "travel_time": 0.15,
+        "distance": 0.05,
+    },
+    "HIGH": {
+        "safety": 0.40,
+        "accessibility": 0.20,
+        "reliability": 0.30,
+        "travel_time": 0.08,
+        "distance": 0.02,
+    },
+    "EMERGENCY": {
+        "safety": 0.50,
+        "accessibility": 0.25,
+        "reliability": 0.20,
+        "travel_time": 0.05,
+        "distance": 0.00,
+    },
+}
+
 
 def calculate_reliability_score(risk_score: float, accessibility_score: float) -> float:
     """Reliability = inverse blend of risk and accessibility."""
@@ -140,14 +168,70 @@ async def analyze_route(
         )
         scored_routes.append(route_candidate)
 
-    # Select recommended route (lowest risk score with good accessibility)
-    def route_score(r: RouteCandidate) -> float:
-        # Lower is better: prioritize safety + accessibility over distance
-        return r.risk_score * 0.6 - r.accessibility_score * 0.4
+    # Select recommended route using priority-weighted composite scoring
+    # Normalise travel-time and distance to 0-100 scores (inverted — lower raw value = higher score)
+    all_times = [r.eta_minutes for r in scored_routes]
+    all_dists = [r.distance_km for r in scored_routes]
+    max_time = max(all_times) if max(all_times) > 0 else 1
+    max_dist = max(all_dists) if max(all_dists) > 0 else 1
 
-    scored_routes.sort(key=route_score)
+    weights = PRIORITY_WEIGHTS.get(request.priority, PRIORITY_WEIGHTS["NORMAL"])
+    logger.info(f"Using priority weights for '{request.priority}': {weights}")
+
+    def route_score(r: RouteCandidate) -> float:
+        """Higher composite score = better route."""
+        safety_score = 100.0 - r.risk_score           # higher = safer
+        accessibility = r.accessibility_score          # higher = better
+        reliability = r.reliability_score              # higher = better
+        time_score = (1.0 - r.eta_minutes / max_time) * 100.0   # lower time = higher score
+        dist_score = (1.0 - r.distance_km / max_dist) * 100.0   # shorter = higher score
+
+        composite = (
+            safety_score * weights["safety"] +
+            accessibility * weights["accessibility"] +
+            reliability * weights["reliability"] +
+            time_score * weights["travel_time"] +
+            dist_score * weights["distance"]
+        )
+        return composite  # higher = better
+
+    # Sort descending — best score first
+    scored_routes.sort(key=route_score, reverse=True)
     recommended = scored_routes[0]
     recommended.is_recommended = True
+
+    # Build a dynamic "Why this route?" explanation based on priority and actual metrics
+    def build_priority_explanation(r: RouteCandidate, priority: str, weights: dict) -> str:
+        safety_score = round(100.0 - r.risk_score, 1)
+        lines = []
+        if priority == "NORMAL":
+            lines.append("Recommended because it provides the best overall balance across safety, accessibility, and reliability.")
+        elif priority == "HIGH":
+            lines.append("Recommended because safety and reliability are prioritized under HIGH priority.")
+        elif priority == "EMERGENCY":
+            lines.append("Recommended because safety and accessibility are prioritized over distance and travel time under EMERGENCY priority.")
+        else:
+            lines.append("Recommended based on composite scoring.")
+
+        # Add metric highlights
+        if safety_score >= 70:
+            lines.append(f"Safety score: {safety_score}/100 (low risk corridor).")
+        elif safety_score >= 50:
+            lines.append(f"Safety score: {safety_score}/100 (moderate risk — proceed with caution).")
+        else:
+            lines.append(f"Safety score: {safety_score}/100 (higher risk — best available option given constraints).")
+
+        if r.accessibility_score >= 70:
+            lines.append(f"Accessibility: {r.accessibility_score}/100 (easily reachable).")
+        elif r.accessibility_score >= 50:
+            lines.append(f"Accessibility: {r.accessibility_score}/100 (moderate accessibility).")
+        else:
+            lines.append(f"Accessibility: {r.accessibility_score}/100 (difficult terrain — prepare accordingly).")
+
+        lines.append(f"Reliability: {r.reliability_score}/100. Distance: {r.distance_km} km. ETA: {r.eta_minutes} min.")
+        return " ".join(lines)
+
+    recommended.priority_explanation = build_priority_explanation(recommended, request.priority, weights)
 
     # Generate AI explanation for recommended route
     ai_data = {

@@ -109,35 +109,51 @@ def generate_demo_routes(src_lat: float, src_lng: float, dst_lat: float, dst_lng
     route2_km = round(straight_km * 1.65, 1)
     route3_km = round(straight_km * 1.90, 1)
 
-    def make_waypoints(multiplier: float) -> List:
-        """Generate intermediate waypoints along a route."""
-        mid_lat = (src_lat + dst_lat) / 2 + (multiplier * 0.3)
-        mid_lng = (src_lng + dst_lng) / 2
-        return [
-            [src_lat, src_lng],
-            [src_lat + (dst_lat - src_lat) * 0.25, src_lng + (dst_lng - src_lng) * 0.25 + multiplier * 0.1],
-            [mid_lat, mid_lng],
-            [src_lat + (dst_lat - src_lat) * 0.75, src_lng + (dst_lng - src_lng) * 0.75 + multiplier * 0.05],
-            [dst_lat, dst_lng]
-        ]
+    def make_waypoints(multiplier: float, curve_type: int = 1) -> List:
+        """Generate intermediate waypoints following realistic road curves."""
+        # Calculate perpendicular direction for lateral road curve offset
+        length = math.sqrt(dlat**2 + dlng**2) or 1.0
+        # Perpendicular vector (-dlng, dlat) normalized
+        perp_lat = -dlng / length
+        perp_lng = dlat / length
+
+        # Generate a multi-segment curved path following terrain contour
+        points = []
+        num_segments = 8
+        for k in range(num_segments + 1):
+            t = k / num_segments
+            # Interpolate base line
+            b_lat = src_lat + t * dlat
+            b_lng = src_lng + t * dlng
+            
+            # Sine curve offset for winding road feel
+            sine_offset = math.sin(t * math.pi) * multiplier * 0.15
+            # Secondary wiggle for mountain turns
+            wiggle = math.sin(t * 3 * math.pi) * 0.02 * (1 if curve_type == 1 else -1)
+            
+            p_lat = b_lat + (sine_offset + wiggle) * perp_lat
+            p_lng = b_lng + (sine_offset + wiggle) * perp_lng
+            points.append([p_lat, p_lng])
+
+        return points
 
     return [
         {
             "distance_km": route1_km,
             "eta_minutes": int(route1_km * 1.5),  # ~40 km/h avg NER
-            "geometry": {"type": "LineString", "coordinates": [[p[1], p[0]] for p in make_waypoints(0)]},
+            "geometry": {"type": "LineString", "coordinates": [[p[1], p[0]] for p in make_waypoints(0.25, 1)]},
             "is_demo": True
         },
         {
             "distance_km": route2_km,
             "eta_minutes": int(route2_km * 1.7),
-            "geometry": {"type": "LineString", "coordinates": [[p[1], p[0]] for p in make_waypoints(0.5)]},
+            "geometry": {"type": "LineString", "coordinates": [[p[1], p[0]] for p in make_waypoints(0.55, 2)]},
             "is_demo": True
         },
         {
             "distance_km": route3_km,
             "eta_minutes": int(route3_km * 1.9),
-            "geometry": {"type": "LineString", "coordinates": [[p[1], p[0]] for p in make_waypoints(-0.4)]},
+            "geometry": {"type": "LineString", "coordinates": [[p[1], p[0]] for p in make_waypoints(-0.45, 1)]},
             "is_demo": True
         }
     ]
