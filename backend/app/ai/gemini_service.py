@@ -156,16 +156,35 @@ async def test_gemini_connection() -> Dict:
         
         available_models = await discover_available_gemini_models(client)
         
-        res = await client.aio.models.generate_content(
-            model=configured_model,
-            contents="Respond with exactly:\nGemini connection successful."
-        )
+        # Override deprecated model if needed
+        test_model = configured_model
+        if test_model in ("gemini-1.5-flash", "gemini-2.5-flash"):
+            test_model = "gemini-3.6-flash"
+            
+        try:
+            res = await client.aio.models.generate_content(
+                model=test_model,
+                contents="Respond with exactly:\nGemini connection successful."
+            )
+        except Exception as first_err:
+            cat = _categorize_gemini_error(first_err)
+            if cat in ("MODEL_UNAVAILABLE", "QUOTA_ERROR", "RATE_LIMIT"):
+                resolved = await _resolve_working_model(client, configured_model)
+                test_model = resolved
+                res = await client.aio.models.generate_content(
+                    model=test_model,
+                    contents="Respond with exactly:\nGemini connection successful."
+                )
+            else:
+                raise first_err
+
         if res and res.text:
             return {
                 "status": "SUCCESS",
                 "category": "SUCCESS",
                 "response": res.text.strip(),
-                "model_used": configured_model,
+                "model_used": test_model,
+                "configured_model": configured_model,
                 "available_models": available_models,
                 "has_gemini": True
             }
@@ -183,6 +202,7 @@ async def test_gemini_connection() -> Dict:
             "status": "FAILURE",
             "category": category,
             "error": str(e),
+            "configured_model": configured_model,
             "has_gemini": True
         }
 
@@ -209,8 +229,11 @@ async def analyze_route_with_ai(route_data: Dict) -> str:
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
         prompt = _build_route_prompt(route_data)
 
-        # Attempt call with configured model first
+        # Attempt call with configured model first (bypassing obsolete model names)
         active_model = configured_model
+        if active_model in ("gemini-1.5-flash", "gemini-2.5-flash"):
+            active_model = "gemini-3.6-flash"
+
         try:
             response = await client.aio.models.generate_content(
                 model=active_model,
@@ -253,6 +276,7 @@ async def analyze_route_with_ai(route_data: Dict) -> str:
         category = _categorize_gemini_error(e)
         logger.error(f"Gemini request failed: {category} ({e})")
         return f"[AI analysis unavailable — backend error ({category})]\n\n{DEMO_BODY}"
+
 
 
 async def explain_risk_with_ai(risk_data: Dict) -> str:
