@@ -1,5 +1,5 @@
 import logging
-from typing import Dict
+from typing import Dict, List, Optional
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -80,23 +80,59 @@ def _categorize_gemini_error(e: Exception) -> str:
     code = getattr(e, 'code', None)
     if code in (400, 403) or any(k in error_str for k in ['api_key_invalid', 'invalid api key', 'unauthorized', 'forbidden', 'permissiondenied']):
         return "INVALID_API_KEY"
-    if code == 404 or any(k in error_str for k in ['not_found', 'model not found', 'not found']):
+    if code == 404 or any(k in error_str for k in ['not_found', 'model not found', 'no longer available']):
         return "MODEL_NOT_FOUND"
-    if code == 429 or any(k in error_str for k in ['quota', 'resourceexhausted', 'rate limit', 'too many requests']):
-        return "QUOTA_EXCEEDED"
+    if code in (429, 503) or any(k in error_str for k in ['quota', 'resourceexhausted', 'rate limit', 'too many requests', 'high demand', 'unavailable']):
+        return "QUOTA_OR_RATE_LIMIT"
     if any(k in error_str for k in ['connection', 'timeout', 'unreachable', 'network', 'httpx', 'socket']):
         return "NETWORK_ERROR"
 
     return f"OTHER_API_ERROR ({error_type})"
 
 
+async def _resolve_working_model(client, preferred_model: str) -> str:
+    """Inspect SDK models supporting generateContent and return a verified operational model name."""
+    from google.genai import types
+
+    candidates = [preferred_model, "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+    for m_name in candidates:
+        if not m_name:
+            continue
+        try:
+            res = await client.aio.models.generate_content(
+                model=m_name,
+                contents="ping",
+                config=types.GenerateContentConfig(
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                ),
+            )
+            if res and res.text:
+                logger.info(f"Verified active Gemini model via SDK ping: {m_name}")
+                return m_name
+        except Exception:
+            continue
+
+    # Query SDK model catalog if candidates failed
+    try:
+        models = list(client.models.list())
+        for m in models:
+            name = m.name.replace("models/", "")
+            actions = getattr(m, "supported_actions", [])
+            if "generateContent" in actions and "flash" in name:
+                return name
+    except Exception as e:
+        logger.warning(f"SDK model list query warning: {e}")
+
+    return preferred_model or "gemini-3.6-flash"
+
+
 async def analyze_route_with_ai(route_data: Dict) -> str:
     """Call Gemini API to generate route explanation using the google-genai SDK."""
-    model_name = settings.GEMINI_MODEL or "gemini-3.6-flash"
+    configured_model = settings.GEMINI_MODEL or "gemini-3.6-flash"
 
     # Safe diagnostic logging (never log API keys or secrets)
-    logger.info(f"Gemini configured: {'yes' if settings.has_gemini else 'no'}")
-    logger.info(f"Gemini model: {model_name}")
+    logger.info(f"Gemini key configured: {'YES' if settings.has_gemini else 'NO'}")
+    logger.info(f"Gemini model configured: {configured_model}")
 
     if not settings.has_gemini:
         logger.warning("Gemini Error [MISSING_API_KEY]: GEMINI_API_KEY is not configured — returning demo explanation")
@@ -109,13 +145,31 @@ async def analyze_route_with_ai(route_data: Dict) -> str:
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
         prompt = _build_route_prompt(route_data)
 
-        response = await client.aio.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
-            ),
-        )
+        # Attempt call with configured model first
+        active_model = configured_model
+        try:
+            response = await client.aio.models.generate_content(
+                model=active_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                ),
+            )
+        except Exception as first_err:
+            category = _categorize_gemini_error(first_err)
+            if category in ("MODEL_NOT_FOUND", "QUOTA_OR_RATE_LIMIT"):
+                logger.warning(f"Primary model '{active_model}' encountered {category}. Resolving fallback model via SDK...")
+                active_model = await _resolve_working_model(client, configured_model)
+                logger.info(f"Retrying Gemini call with resolved model: {active_model}")
+                response = await client.aio.models.generate_content(
+                    model=active_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                    ),
+                )
+            else:
+                raise first_err
 
         if response and response.text:
             return response.text
@@ -134,7 +188,7 @@ async def analyze_route_with_ai(route_data: Dict) -> str:
 
 async def explain_risk_with_ai(risk_data: Dict) -> str:
     """Generate a plain-language risk explanation using the google-genai SDK."""
-    model_name = settings.GEMINI_MODEL or "gemini-3.6-flash"
+    configured_model = settings.GEMINI_MODEL or "gemini-3.6-flash"
 
     if not settings.has_gemini:
         logger.warning("Gemini risk explain skipped [MISSING_API_KEY]: returning demo risk text")
@@ -148,7 +202,7 @@ async def explain_risk_with_ai(risk_data: Dict) -> str:
         prompt = _build_risk_prompt(risk_data)
 
         response = await client.aio.models.generate_content(
-            model=model_name,
+            model=configured_model,
             contents=prompt,
             config=types.GenerateContentConfig(
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
@@ -166,4 +220,5 @@ async def explain_risk_with_ai(risk_data: Dict) -> str:
         category = _categorize_gemini_error(e)
         logger.error(f"Gemini risk explain error [{category}]: {e}")
         return f"[AI explanation unavailable — {category}]"
+
 
