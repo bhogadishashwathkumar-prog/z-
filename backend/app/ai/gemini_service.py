@@ -95,9 +95,9 @@ async def _resolve_working_model(client, preferred_model: str) -> str:
     """Inspect SDK models supporting generateContent and return a verified operational model name."""
     from google.genai import types
 
-    candidates = [preferred_model, "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+    candidates = [preferred_model, "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]
     for m_name in candidates:
-        if not m_name:
+        if not m_name or m_name in ("gemini-1.5-flash", "gemini-2.5-flash"):
             continue
         try:
             res = await client.aio.models.generate_content(
@@ -113,18 +113,7 @@ async def _resolve_working_model(client, preferred_model: str) -> str:
         except Exception:
             continue
 
-    # Query SDK model catalog if candidates failed
-    try:
-        models = list(client.models.list())
-        for m in models:
-            name = m.name.replace("models/", "")
-            actions = getattr(m, "supported_actions", [])
-            if "generateContent" in actions and "flash" in name:
-                return name
-    except Exception as e:
-        logger.warning(f"SDK model list query warning: {e}")
-
-    return preferred_model or "gemini-3.6-flash"
+    return "gemini-3.6-flash"
 
 
 async def analyze_route_with_ai(route_data: Dict) -> str:
@@ -132,17 +121,19 @@ async def analyze_route_with_ai(route_data: Dict) -> str:
     configured_model = settings.GEMINI_MODEL or "gemini-3.6-flash"
 
     # Safe diagnostic logging (never log API keys or secrets)
-    logger.info(f"Gemini key configured: {'YES' if settings.has_gemini else 'NO'}")
-    logger.info(f"Gemini model configured: {configured_model}")
+    logger.info(f"Gemini configured: {'YES' if settings.has_gemini else 'NO'}")
+    logger.info(f"Gemini model: {configured_model}")
+    logger.info("Gemini SDK: google-genai")
 
     if not settings.has_gemini:
-        logger.warning("Gemini Error [MISSING_API_KEY]: GEMINI_API_KEY is not configured — returning demo explanation")
+        logger.warning("Gemini request failed: MISSING_API_KEY — GEMINI_API_KEY is not configured — returning demo explanation")
         return DEMO_EXPLANATION
 
     try:
         from google import genai
         from google.genai import types
 
+        logger.info("Gemini request started")
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
         prompt = _build_route_prompt(route_data)
 
@@ -159,32 +150,36 @@ async def analyze_route_with_ai(route_data: Dict) -> str:
         except Exception as first_err:
             category = _categorize_gemini_error(first_err)
             if category in ("MODEL_NOT_FOUND", "QUOTA_OR_RATE_LIMIT"):
-                logger.warning(f"Primary model '{active_model}' encountered {category}. Pausing 1.5s and resolving model...")
-                await asyncio.sleep(1.5)
-                active_model = await _resolve_working_model(client, configured_model)
-                logger.info(f"Retrying Gemini call with resolved model: {active_model}")
-                response = await client.aio.models.generate_content(
-                    model=active_model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
-                    ),
-                )
+                logger.warning(f"Primary model '{active_model}' encountered {category}. Resolving operational model...")
+                resolved_model = await _resolve_working_model(client, configured_model)
+                if resolved_model != active_model:
+                    active_model = resolved_model
+                    logger.info(f"Retrying Gemini call with resolved model: {active_model}")
+                    response = await client.aio.models.generate_content(
+                        model=active_model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+                        ),
+                    )
+                else:
+                    raise first_err
             else:
                 raise first_err
 
         if response and response.text:
+            logger.info("Gemini request succeeded")
             return response.text
         else:
-            logger.warning("Gemini returned empty text response — using demo fallback")
+            logger.warning("Gemini request failed: EMPTY_RESPONSE — using demo fallback")
             return f"[AI analysis unavailable — empty response. Using demo explanation]\n\n{DEMO_EXPLANATION}"
 
     except ImportError as e:
-        logger.error(f"Gemini Error [SDK_IMPORT_ERROR]: google-genai package missing or import failed: {e}")
+        logger.error(f"Gemini request failed: SDK_IMPORT_ERROR ({e})")
         return f"[AI analysis unavailable — missing google-genai package]\n\n{DEMO_EXPLANATION}"
     except Exception as e:
         category = _categorize_gemini_error(e)
-        logger.error(f"Gemini Error [{category}]: {e}")
+        logger.error(f"Gemini request failed: {category} ({e})")
         return f"[AI analysis unavailable — backend error ({category}). Using demo explanation]\n\n{DEMO_EXPLANATION}"
 
 
@@ -194,7 +189,7 @@ async def explain_risk_with_ai(risk_data: Dict) -> str:
     configured_model = settings.GEMINI_MODEL or "gemini-3.6-flash"
 
     if not settings.has_gemini:
-        logger.warning("Gemini risk explain skipped [MISSING_API_KEY]: returning demo risk text")
+        logger.warning("Gemini risk explain request failed: MISSING_API_KEY — returning demo risk text")
         return "[DEMO MODE] Risk score has been calculated based on weather conditions, road infrastructure, terrain difficulty, active disruption reports, and historical data for this NER corridor. Higher scores indicate routes with greater danger and should be avoided unless absolutely necessary."
 
     try:
@@ -217,11 +212,12 @@ async def explain_risk_with_ai(risk_data: Dict) -> str:
         return "[AI explanation unavailable — empty response]"
 
     except ImportError as e:
-        logger.error(f"Gemini risk explain error [SDK_IMPORT_ERROR]: google-genai package missing: {e}")
+        logger.error(f"Gemini risk explain request failed: SDK_IMPORT_ERROR ({e})")
         return "[AI explanation unavailable — missing google-genai package]"
     except Exception as e:
         category = _categorize_gemini_error(e)
-        logger.error(f"Gemini risk explain error [{category}]: {e}")
+        logger.error(f"Gemini risk explain request failed: {category} ({e})")
         return f"[AI explanation unavailable — {category}]"
+
 
 

@@ -40,8 +40,9 @@ def get_weather_risk_level(rainfall_mm: float, condition: str) -> str:
 
 
 async def get_weather(latitude: float, longitude: float) -> Dict:
+    logger.info(f"OpenWeather configured: {'YES' if settings.has_openweather else 'NO'}")
     if not settings.has_openweather:
-        logger.info("OpenWeather API not configured - returning demo data")
+        logger.info("OpenWeather request: SKIPPED — Weather mode: DEMO")
         return _get_demo_weather(latitude, longitude)
 
     try:
@@ -65,6 +66,7 @@ async def get_weather(latitude: float, longitude: float) -> Dict:
         visibility_km = data.get("visibility", 10000) / 1000
 
         risk = get_weather_risk_level(rainfall_mm, condition)
+        logger.info("OpenWeather request: SUCCESS — Weather mode: LIVE")
 
         return {
             "temperature_c": round(temp, 1),
@@ -78,8 +80,9 @@ async def get_weather(latitude: float, longitude: float) -> Dict:
             "is_demo": False
         }
     except Exception as e:
-        logger.warning(f"OpenWeather API error: {e} - falling back to demo data")
+        logger.warning(f"OpenWeather request: FAILURE ({e}) — Weather mode: DEMO")
         return _get_demo_weather(latitude, longitude)
+
 
 
 def _get_demo_weather(lat: float, lon: float) -> Dict:
