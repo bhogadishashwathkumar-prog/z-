@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Dict, List, Optional
 from app.config import settings
@@ -158,7 +159,8 @@ async def analyze_route_with_ai(route_data: Dict) -> str:
         except Exception as first_err:
             category = _categorize_gemini_error(first_err)
             if category in ("MODEL_NOT_FOUND", "QUOTA_OR_RATE_LIMIT"):
-                logger.warning(f"Primary model '{active_model}' encountered {category}. Resolving fallback model via SDK...")
+                logger.warning(f"Primary model '{active_model}' encountered {category}. Pausing 1.5s and resolving model...")
+                await asyncio.sleep(1.5)
                 active_model = await _resolve_working_model(client, configured_model)
                 logger.info(f"Retrying Gemini call with resolved model: {active_model}")
                 response = await client.aio.models.generate_content(
@@ -184,6 +186,7 @@ async def analyze_route_with_ai(route_data: Dict) -> str:
         category = _categorize_gemini_error(e)
         logger.error(f"Gemini Error [{category}]: {e}")
         return f"[AI analysis unavailable — backend error ({category}). Using demo explanation]\n\n{DEMO_EXPLANATION}"
+
 
 
 async def explain_risk_with_ai(risk_data: Dict) -> str:
