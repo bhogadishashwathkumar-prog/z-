@@ -5,23 +5,18 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-DEMO_EXPLANATION = """[DEMO MODE — No Gemini API Key] 
-
-**Route Analysis Summary:**
-Based on the calculated risk and accessibility scores, Route A is recommended over the alternatives. While it may not be the shortest path, it offers significantly better safety margins given the current weather conditions and road infrastructure in this NER corridor.
+DEMO_BODY = """**Route Analysis Summary:**
+Based on the calculated risk and accessibility scores, the recommended route offers significantly better safety margins given the current weather conditions and road infrastructure in this NER corridor.
 
 **Key Observations:**
 - The recommended route has a lower risk score, indicating fewer active disruptions and better road surface conditions.
 - Terrain factors have been considered — mountainous segments of NER demand extra caution during monsoon season.
-- Weather conditions along the route show moderate rainfall impact; road conditions may deteriorate at higher elevations.
+- Weather conditions along the route show rainfall impact; road conditions may deteriorate at higher elevations.
 
 **Delivery Recommendation:**
 Proceed with the recommended route but ensure vehicle is equipped for wet road conditions. Monitor weather updates during transit.
 
-**Emergency Note:**
-If conditions worsen, the alternative route via lower elevation may provide safer passage, though at increased distance.
-
-*This explanation is generated from backend-calculated data. No real-time government or weather data was used to generate this summary.*"""
+*This explanation is generated from backend-calculated data fallback.*"""
 
 
 def _build_route_prompt(route_data: Dict) -> str:
@@ -79,16 +74,38 @@ def _categorize_gemini_error(e: Exception) -> str:
     error_type = type(e).__name__
 
     code = getattr(e, 'code', None)
-    if code in (400, 403) or any(k in error_str for k in ['api_key_invalid', 'invalid api key', 'unauthorized', 'forbidden', 'permissiondenied']):
-        return "INVALID_API_KEY"
+    if code == 401 or any(k in error_str for k in ['api_key_invalid', 'invalid api key', 'unauthorized', 'invalid_api_key']):
+        return "INVALID_KEY"
+    if code == 403 or any(k in error_str for k in ['forbidden', 'permissiondenied', 'permission_denied']):
+        return "PERMISSION_ERROR"
     if code == 404 or any(k in error_str for k in ['not_found', 'model not found', 'no longer available']):
-        return "MODEL_NOT_FOUND"
-    if code in (429, 503) or any(k in error_str for k in ['quota', 'resourceexhausted', 'rate limit', 'too many requests', 'high demand', 'unavailable']):
-        return "QUOTA_OR_RATE_LIMIT"
+        return "MODEL_UNAVAILABLE"
+    if code == 429 or any(k in error_str for k in ['quota', 'resourceexhausted', 'rate limit', 'too many requests', 'resource_exhausted']):
+        return "QUOTA_ERROR"
+    if code == 503 or any(k in error_str for k in ['unavailable', 'high demand', 'service_unavailable']):
+        return "RATE_LIMIT"
     if any(k in error_str for k in ['connection', 'timeout', 'unreachable', 'network', 'httpx', 'socket']):
         return "NETWORK_ERROR"
+    if isinstance(e, ImportError) or 'import' in error_str:
+        return "SDK_ERROR"
 
-    return f"OTHER_API_ERROR ({error_type})"
+    return f"UNKNOWN_ERROR ({error_type})"
+
+
+async def discover_available_gemini_models(client) -> List[str]:
+    """Query SDK model catalog to discover models supporting generateContent."""
+    available_models = []
+    try:
+        models = list(client.models.list())
+        for m in models:
+            name = m.name.replace("models/", "")
+            actions = getattr(m, "supported_actions", [])
+            if "generateContent" in actions:
+                available_models.append(name)
+        logger.info(f"Discovered available Gemini models: {available_models}")
+    except Exception as e:
+        logger.warning(f"Model discovery warning: {e}")
+    return available_models
 
 
 async def _resolve_working_model(client, preferred_model: str) -> str:
@@ -116,18 +133,73 @@ async def _resolve_working_model(client, preferred_model: str) -> str:
     return "gemini-3.6-flash"
 
 
+async def test_gemini_connection() -> Dict:
+    """Test Gemini API connection independently with minimal prompt."""
+    configured_model = settings.GEMINI_MODEL or "gemini-3.6-flash"
+
+    logger.info("Gemini SDK: google-genai")
+    logger.info(f"Gemini key configured: {'YES' if settings.has_gemini else 'NO'}")
+    logger.info(f"Gemini model: {configured_model}")
+    logger.info(f"has_gemini: {settings.has_gemini}")
+
+    if not settings.has_gemini:
+        return {
+            "status": "FAILURE",
+            "category": "MISSING_KEY",
+            "configured_model": configured_model,
+            "has_gemini": False
+        }
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        
+        available_models = await discover_available_gemini_models(client)
+        
+        res = await client.aio.models.generate_content(
+            model=configured_model,
+            contents="Respond with exactly:\nGemini connection successful."
+        )
+        if res and res.text:
+            return {
+                "status": "SUCCESS",
+                "category": "SUCCESS",
+                "response": res.text.strip(),
+                "model_used": configured_model,
+                "available_models": available_models,
+                "has_gemini": True
+            }
+        else:
+            return {
+                "status": "FAILURE",
+                "category": "UNKNOWN_ERROR",
+                "detail": "Empty text response",
+                "has_gemini": True
+            }
+    except Exception as e:
+        category = _categorize_gemini_error(e)
+        logger.error(f"Gemini connection test failed: {category} ({e})")
+        return {
+            "status": "FAILURE",
+            "category": category,
+            "error": str(e),
+            "has_gemini": True
+        }
+
+
 async def analyze_route_with_ai(route_data: Dict) -> str:
     """Call Gemini API to generate route explanation using the google-genai SDK."""
     configured_model = settings.GEMINI_MODEL or "gemini-3.6-flash"
 
     # Safe diagnostic logging (never log API keys or secrets)
-    logger.info(f"Gemini configured: {'YES' if settings.has_gemini else 'NO'}")
-    logger.info(f"Gemini model: {configured_model}")
     logger.info("Gemini SDK: google-genai")
+    logger.info(f"Gemini key configured: {'YES' if settings.has_gemini else 'NO'}")
+    logger.info(f"Gemini model: {configured_model}")
+    logger.info(f"has_gemini: {settings.has_gemini}")
 
     if not settings.has_gemini:
-        logger.warning("Gemini request failed: MISSING_API_KEY — GEMINI_API_KEY is not configured — returning demo explanation")
-        return DEMO_EXPLANATION
+        logger.warning("Gemini request failed: MISSING_KEY — GEMINI_API_KEY is not configured — returning fallback")
+        return f"[DEMO MODE — No Gemini API Key Configured]\n\n{DEMO_BODY}"
 
     try:
         from google import genai
@@ -149,7 +221,7 @@ async def analyze_route_with_ai(route_data: Dict) -> str:
             )
         except Exception as first_err:
             category = _categorize_gemini_error(first_err)
-            if category in ("MODEL_NOT_FOUND", "QUOTA_OR_RATE_LIMIT"):
+            if category in ("MODEL_UNAVAILABLE", "QUOTA_ERROR", "RATE_LIMIT"):
                 logger.warning(f"Primary model '{active_model}' encountered {category}. Resolving operational model...")
                 resolved_model = await _resolve_working_model(client, configured_model)
                 if resolved_model != active_model:
@@ -171,17 +243,16 @@ async def analyze_route_with_ai(route_data: Dict) -> str:
             logger.info("Gemini request succeeded")
             return response.text
         else:
-            logger.warning("Gemini request failed: EMPTY_RESPONSE — using demo fallback")
-            return f"[AI analysis unavailable — empty response. Using demo explanation]\n\n{DEMO_EXPLANATION}"
+            logger.warning("Gemini request failed: EMPTY_RESPONSE — using fallback")
+            return f"[AI analysis unavailable — empty response from Gemini API]\n\n{DEMO_BODY}"
 
     except ImportError as e:
-        logger.error(f"Gemini request failed: SDK_IMPORT_ERROR ({e})")
-        return f"[AI analysis unavailable — missing google-genai package]\n\n{DEMO_EXPLANATION}"
+        logger.error(f"Gemini request failed: SDK_ERROR ({e})")
+        return f"[AI analysis unavailable — google-genai SDK import error]\n\n{DEMO_BODY}"
     except Exception as e:
         category = _categorize_gemini_error(e)
         logger.error(f"Gemini request failed: {category} ({e})")
-        return f"[AI analysis unavailable — backend error ({category}). Using demo explanation]\n\n{DEMO_EXPLANATION}"
-
+        return f"[AI analysis unavailable — backend error ({category})]\n\n{DEMO_BODY}"
 
 
 async def explain_risk_with_ai(risk_data: Dict) -> str:
@@ -189,8 +260,8 @@ async def explain_risk_with_ai(risk_data: Dict) -> str:
     configured_model = settings.GEMINI_MODEL or "gemini-3.6-flash"
 
     if not settings.has_gemini:
-        logger.warning("Gemini risk explain request failed: MISSING_API_KEY — returning demo risk text")
-        return "[DEMO MODE] Risk score has been calculated based on weather conditions, road infrastructure, terrain difficulty, active disruption reports, and historical data for this NER corridor. Higher scores indicate routes with greater danger and should be avoided unless absolutely necessary."
+        logger.warning("Gemini risk explain request failed: MISSING_KEY — returning demo risk text")
+        return "[DEMO MODE — No Gemini API Key Configured] Risk score has been calculated based on weather conditions, road infrastructure, terrain difficulty, active disruption reports, and historical data for this NER corridor."
 
     try:
         from google import genai
@@ -212,12 +283,13 @@ async def explain_risk_with_ai(risk_data: Dict) -> str:
         return "[AI explanation unavailable — empty response]"
 
     except ImportError as e:
-        logger.error(f"Gemini risk explain request failed: SDK_IMPORT_ERROR ({e})")
+        logger.error(f"Gemini risk explain request failed: SDK_ERROR ({e})")
         return "[AI explanation unavailable — missing google-genai package]"
     except Exception as e:
         category = _categorize_gemini_error(e)
         logger.error(f"Gemini risk explain request failed: {category} ({e})")
         return f"[AI explanation unavailable — {category}]"
+
 
 
 

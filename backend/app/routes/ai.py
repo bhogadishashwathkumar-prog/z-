@@ -1,7 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Optional
-from app.ai.gemini_service import analyze_route_with_ai, explain_risk_with_ai
+from app.ai.gemini_service import analyze_route_with_ai, explain_risk_with_ai, test_gemini_connection
+
+
+@router.get("/test")
+async def ai_test():
+    """Independent Gemini connection diagnostic test."""
+    return await test_gemini_connection()
+
 from app.utils.dependencies import get_current_user
 from app.models.user import User
 
