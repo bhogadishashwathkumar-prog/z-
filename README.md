@@ -1,3 +1,4 @@
+Off Campus Code: H5RYDM
 # NER SmartLogix — AI-Based Smart Logistics and Accessibility Intelligence Platform for NER
 
 ### Smart India Hackathon 2026 | Problem Statement: SIH26002
